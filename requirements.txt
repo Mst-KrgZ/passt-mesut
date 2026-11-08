@@ -1,0 +1,5 @@
+# Obergrenzen bewusst gesetzt: Die App ist öffentlich verlinkt, ein Breaking Change
+# in einer neuen Minor-Version darf sie nicht unbemerkt zerlegen.
+streamlit>=1.40,<2.0
+numpy>=1.26,<3.0
+fastembed>=0.4,<0.8
