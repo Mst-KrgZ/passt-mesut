@@ -388,7 +388,7 @@ SKILLS = [
     },
     {
         "key": "aws", "label": "AWS (Grundlagen)", "kategorie": "Deployment & Tooling", "staerke": 2,
-        "aliases": ["aws", "amazon web services", "s3", "rds", "sagemaker", "cloud", "cloud-dienste",
+        "aliases": ["aws", "amazon web services", "s3", "rds", "sagemaker", "cloud-dienste",
                     "cloud computing"],
         "beleg": "TechPro 15 Std.: Grundlagen, S3, RDS, SageMaker — Ausbildungsniveau, keine Produktionserfahrung",
         "projekte": [],

@@ -76,7 +76,9 @@ _UMFELD = re.compile(
 # Sätze beschreiben den Arbeitgeber, nicht die Erwartung an die Bewerberin. Sie dürfen
 # den Nenner nicht füllen — sonst bestraft ein ausführlicher Imagetext die Passung.
 _SELBSTDARSTELLUNG = re.compile(
-    r"^(als\s+\w+|bei uns|wir|unser\w*|die von uns\w*|das von uns\w*)\b"
+    r"^(?:[^.\n]{0,60}?\b)?(?:wir|unser\w*|uns)\b"
+    r"(?![^.\n]*\b(sie|du|dich|dir|ihnen|ihre|deine)\b)"
+    r"|^(als\s+\w+|bei uns|die von uns\w*|das von uns\w*)\b"
     r"(?![^.\n]*\b(sie|du|dich|dir|ihnen|ihre|deine)\b)",
     re.IGNORECASE,
 )
@@ -172,6 +174,17 @@ _PORTAL = re.compile(
     r"stellenbeschreibung\s*$|keine gehaltsinformationen|befristeter vertrag|"
     r"übersicht über die übereinstimmung|hier sehen sie einen abgleich|"
     r"qualifikationen:\s*\d|\+\s*\d+\s*weitere|teilen|merken|"
+    # LinkedIn
+    r"vor \d+ (minute|stunde|tag|woche|monat)|einfach bewerben|speichern$|"
+    r"noch keine insights|sie sind (kaum|gut|sehr gut) für diesen job|"
+    r"in ihrem profil und lebenslauf fehlen|details zur eignung|"
+    r"haben ihnen diese informationen|\d+ bewerber|unternehmenslogo|"
+    r"details zum jobangebot$|sehen sie sich (die details|weitere jobs)|"
+    r"vom arbeitgeber gesponsert|außerhalb von linkedin|ausserhalb von linkedin|"
+    r"mehr als \d+ personen|\d+ personen haben auf|mit ki ihre eignung|"
+    r"derzeit werden keine bewerbungen|personen, die sie kontaktieren|"
+    r"und weitere kontakte|alle anzeigen$|erneut veröffentlicht|"
+    r"ihr profil (passt|stimmt)|bewerbungsfrist|jetzt schnell bewerben|"
     r"erschienen:|veröffentlicht:|aktualisiert:|\d[\d.]*\s*€\s*-|"
     r"passt (hervorragend|weniger|gut|teilweise)|du erfüllst alle anforderungen|"
     r"basierend auf \S+\.(docx|pdf)|slide number|\S+ logo$|"
@@ -199,6 +212,16 @@ _TITEL = re.compile(
 _JAHRE = re.compile(
     r"(?:mind(?:estens)?\.?\s*)?(\d{1,2})\s*\+?\s*(?:bis\s*\d{1,2}\s*)?jahre?\b[^.\n]{0,60}?"
     r"(berufserfahrung|erfahrung|praxis)",
+    re.IGNORECASE,
+)
+
+# Jahresforderung in Worten statt in Zahlen. „Mehrjährige Erfahrung in
+# Softwareentwicklungsprojekten“ ist genauso eine Hürde wie „3 Jahre Erfahrung“ —
+# sie nicht zu erkennen hiesse, die häufigste Formulierung zu übersehen.
+_JAHRE_WORT = re.compile(
+    r"\b(mehrjährig\w*|langjährig\w*|mehrere jahre|einige jahre)\b"
+    r"[^.\n]{0,70}?(berufserfahrung|erfahrung|praxis|tätigkeit)"
+    r"|\b(berufserfahrung|erfahrung)\b[^.\n]{0,30}?\b(mehrjährig\w*|langjährig\w*)\b",
     re.IGNORECASE,
 )
 
@@ -530,7 +553,14 @@ class Treffer:
     @property
     def gewicht(self) -> float:
         g = self.skill["staerke"] / 5.0
-        return g if self.pflicht else g * 0.5
+        if not self.pflicht:
+            g *= 0.5
+        # Ein semantischer Treffer ist eine Ähnlichkeit, kein Nachweis über ein
+        # bekanntes Synonym. Er darf nicht so schwer wiegen wie ein wörtlicher —
+        # sonst hebt eine Fehlzuordnung des Modells den Wert wie ein echter Beleg.
+        if self.semantisch:
+            g *= 0.7
+        return g
 
 
 @dataclass
@@ -633,8 +663,16 @@ def lade_semantik():
         return False, _semantik_fehler
 
 
-def _semantische_treffer(zeilen: list[str], schwelle: float = 0.48):
-    """Ordnet offenen Zeilen die nächstliegende Kompetenz zu."""
+def _semantische_treffer(
+    zeilen: list[str], schwelle: float = 0.48, abstand: float = 0.04
+):
+    """Ordnet offenen Zeilen die nächstliegende Kompetenz zu.
+
+    Zwei Bedingungen, nicht nur eine: Die Ähnlichkeit muss über der Schwelle liegen
+    UND erkennbar über der zweitbesten Kompetenz. Liegen die beiden gleichauf, ist
+    die Zuordnung Zufall — „Feature-Test“ landet sonst bei „A/B-Testing“, weil in
+    beiden das Wort Test vorkommt.
+    """
     import numpy as np
 
     if not zeilen or _embedder is None or _skill_vectors is None:
@@ -647,12 +685,32 @@ def _semantische_treffer(zeilen: list[str], schwelle: float = 0.48):
     zuordnung: dict[str, list[str]] = {}
     offen: list[str] = []
     for i, zeile in enumerate(zeilen):
-        j = int(sim[i].argmax())
-        if float(sim[i][j]) >= schwelle:
+        reihe = sim[i]
+        j = int(reihe.argmax())
+        bester = float(reihe[j])
+        zweiter = float(np.partition(reihe, -2)[-2]) if reihe.size > 1 else 0.0
+        if bester >= schwelle and (bester - zweiter) >= abstand:
             zuordnung.setdefault(SKILLS[j]["key"], []).append(zeile)
         else:
             offen.append(zeile)
     return zuordnung, offen
+
+
+def _ohne_portal(text: str) -> str:
+    """Rohtext ohne die Oberfläche des Jobportals.
+
+    Für die Kompetenzsuche zählt der ganze Anzeigentext, auch kurze Zeilen und
+    Überschriften — anders als bei der Anforderungszählung darf hier nichts
+    wegfallen. Entfernt wird nur, was das Portal selbst beisteuert: LinkedIns
+    „Mit KI Ihre Eignung ermitteln“ hat sonst die Kompetenz GenAI belegt.
+    """
+    behalten = []
+    for zeile in text.splitlines():
+        sauber = _entmarkiere(zeile)
+        if sauber and _PORTAL.match(sauber):
+            continue
+        behalten.append(zeile)
+    return "\n".join(behalten)
 
 
 # ----------------------------------------------------------------------------
@@ -664,7 +722,7 @@ def analysiere(anzeige: str, semantik: bool = True) -> Ergebnis:
     zeilen = [z for z, _, _ in markiert]
     optional_flags = [opt for _, opt, _ in markiert]
     anforderungs_flags = [anf for _, _, anf in markiert]
-    volltext = _normalise(anzeige)
+    volltext = _normalise(_ohne_portal(anzeige))
 
     def ist_pflicht(zeile: str, idx: int | None = None) -> bool:
         if idx is not None and 0 <= idx < len(optional_flags) and optional_flags[idx]:
@@ -738,8 +796,18 @@ def analysiere(anzeige: str, semantik: bool = True) -> Ergebnis:
         for idx, zeile in enumerate(zeilen):
             if pattern.search(_normalise(zeile)):
                 fundstelle = zeile
-                verlangt = bool(_FORDERUNG.search(zeile)) or bool(_OPTIONAL_MARKER.search(zeile))
-                pflicht = bool(_FORDERUNG.search(zeile)) and ist_pflicht(zeile, idx)
+                im_teil = idx < len(anforderungs_flags) and anforderungs_flags[idx]
+                verlangt = (
+                    bool(_FORDERUNG.search(zeile))
+                    or bool(_OPTIONAL_MARKER.search(zeile))
+                    # Eine Technologie, die im Aufgaben- oder Profilteil steht, ist
+                    # gefordert — auch ohne das Wort „Kenntnisse“. Sonst verschwindet
+                    # genau das Werkzeug lautlos, um das sich die Stelle dreht.
+                    or (im_teil and not _UMFELD.search(zeile))
+                )
+                pflicht = (
+                    bool(_FORDERUNG.search(zeile)) or im_teil
+                ) and ist_pflicht(zeile, idx)
                 if verlangt:
                     erfasste_zeilen.add(idx)
                 break
@@ -782,6 +850,24 @@ def analysiere(anzeige: str, semantik: bool = True) -> Ergebnis:
                     pflicht=gefordert >= 3,
                 )
             )
+
+    elif _JAHRE_WORT.search(anzeige):
+        # Ohne Zahl lässt sich die Höhe nicht beziffern; „mehrjährig“ liegt aber
+        # erkennbar über sieben Monaten Praxis und gehört offen ausgewiesen. Diese
+        # Formulierung ist in deutschen Anzeigen häufiger als jede Jahreszahl.
+        fundstelle = ""
+        for idx, zeile in enumerate(zeilen):
+            if _JAHRE_WORT.search(zeile):
+                fundstelle = zeile
+                erfasste_zeilen.add(idx)
+                break
+        luecken.append(
+            Luecke(
+                begriff="Mehrjährige Berufserfahrung (ohne Jahreszahl gefordert)",
+                fundstelle=fundstelle,
+                pflicht=True,
+            )
+        )
 
     studierenden_stelle = False
     studierenden_fundstelle = ""

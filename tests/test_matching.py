@@ -557,3 +557,89 @@ Kenntnisse in SQL und Python."""
     r = analysiere(senior, semantik=False)
     assert r.score <= 35, r.score
     assert sum(1 for l in r.luecken if l.pflicht) >= 4
+
+
+def test_mehrjaehrige_erfahrung_ohne_zahl_wird_erkannt():
+    """„Mehrjährige Erfahrung“ ist die häufigste Form der Jahresforderung."""
+    r = analysiere(
+        """Business Analyst (m/w/d)
+Qualifikation
+Mehrjährige Erfahrung in Softwareentwicklungsprojekten
+Erfahrung in agilen Projekten nach Scrum und der Erstellung von Fachkonzepten
+Gute Kommunikationsfähigkeit und Sozialkompetenz
+Ausgeprägtes analytisches Denkvermögen und Methodenkompetenz
+Erfahrung mit Tools wie MS-Office, Confluence, Jira""",
+        semantik=False,
+    )
+    assert any("Mehrjährige Berufserfahrung" in l.begriff for l in r.luecken), r.luecken
+    assert any(l.pflicht for l in r.luecken)
+
+
+def test_semantischer_treffer_wiegt_weniger():
+    """Eine Ähnlichkeit darf nicht so schwer wiegen wie ein wörtlicher Nachweis."""
+    from src.matcher import Treffer
+    from src.profile_data import SKILLS
+
+    skill = next(s for s in SKILLS if s["key"] == "sql")
+    woertlich = Treffer(skill=skill, pflicht=True, semantisch=False)
+    aehnlich = Treffer(skill=skill, pflicht=True, semantisch=True)
+    assert aehnlich.gewicht < woertlich.gewicht
+
+
+def test_linkedin_oberflaeche_ist_keine_anforderung():
+    text = """Business Analyst (m/w/d) in Aachen
+Vor 49 Minuten · 1 Bewerber:in
+Sie sind kaum für diesen Job geeignet – sehen Sie sich die Details an
+In Ihrem Profil und Lebenslauf fehlen Qualifikationen.
+Qualifikation
+Erfahrung in agilen Projekten nach Scrum."""
+    zeilen = [z for z, _, _ in split_requirements_markiert(text)]
+    assert not any("kaum für diesen Job" in z for z in zeilen), zeilen
+    assert not any("Vor 49 Minuten" in z for z in zeilen), zeilen
+
+
+def test_technologie_in_aufgaben_ist_eine_luecke():
+    """Snowflake in der Aufgabenbeschreibung ist gefordert, nicht nur Umgebung."""
+    r = analysiere(
+        """Technical Data Analyst (m/w/d)
+Aufgaben:
+Analyse und Optimierung von Datenprozessen in der Cloud Database (Snowflake)
+Entwicklung und Pflege von SQL-Statements für Datenanalysen und ETL-Prozesse
+Sicherstellung der Datenbelieferung für Reporting-Tools
+Profil:
+Sehr gute SQL-Kenntnisse und analytisches Denkvermögen""",
+        semantik=False,
+    )
+    snow = [l for l in r.luecken if l.begriff == "Snowflake"]
+    assert snow, [l.begriff for l in r.luecken]
+    assert snow[0].pflicht
+    assert not any(u.name == "Snowflake" for u in r.umgebung)
+
+
+def test_portaloberflaeche_belegt_keine_kompetenz():
+    """LinkedIns „Mit KI Ihre Eignung ermitteln“ darf GenAI nicht belegen."""
+    r = analysiere(
+        """Data Analyst (m/w/d)
+Mit KI Ihre Eignung ermitteln
+Vom Arbeitgeber gesponsert
+Profil:
+Sehr gute SQL-Kenntnisse und Erfahrung im Reporting.
+Sie arbeiten strukturiert und kommunizieren mit Fachbereichen.
+Erfahrung mit Power BI und Datenmodellierung.""",
+        semantik=False,
+    )
+    assert not any("GenAI" in t.skill["label"] for t in r.treffer), \
+        [t.skill["label"] for t in r.treffer]
+
+
+def test_cloud_allein_belegt_kein_aws():
+    r = analysiere(
+        """Data Engineer (m/w/d)
+Profil:
+Erfahrung mit einer Cloud Database und mit SQL.
+Sie arbeiten strukturiert und dokumentieren Ihre Ergebnisse.
+Erfahrung im Reporting und in der Datenmodellierung.""",
+        semantik=False,
+    )
+    assert not any(t.skill["key"] == "aws" for t in r.treffer), \
+        [t.skill["label"] for t in r.treffer]
